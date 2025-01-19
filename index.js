@@ -37,6 +37,7 @@ async function run() {
     // database and collections
     const database = client.db("theHotelDB");
     const roomsCollection = database.collection("rooms");
+    const bookingsCollection = database.collection("bookings");
 
     // rooms apis
     app.get("/rooms", async (req, res) => {
@@ -50,11 +51,11 @@ async function run() {
       try {
         const id = req.params.id;
 
-        if (id.length !== 24) {
-          return res.status(400).send({
-            success: false,
-            message: "Invalid ID format",
-          });
+        // Validate room ID
+        if (!ObjectId.isValid(id)) {
+          return res
+            .status(400)
+            .send({ success: false, message: "Invalid room ID" });
         }
 
         const query = { _id: new ObjectId(id) };
@@ -78,7 +79,51 @@ async function run() {
         });
       }
     });
-    
+
+    // booking apis
+    app.post("/booking", async (req, res) => {
+      try {
+        const bookingInfo = req.body;
+        
+        // Validate room ID
+        if (!ObjectId.isValid(bookingInfo.roomId)) {
+          return res
+            .status(400)
+            .send({ success: false, message: "Invalid room ID" });
+        }
+
+        // Validate booking date
+        if (!bookingInfo.bookingDate) {
+          return res
+            .status(400)
+            .send({ success: false, message: "Booking date is required" });
+        }
+
+        // inserting booking details to booking collection
+        const insertionResult = await bookingsCollection.insertOne(bookingInfo);
+
+        // Update the document by pushing the new booking date to the `bookings` array
+        const updatesResult = await roomsCollection.updateOne(
+          { _id: new ObjectId(bookingInfo.roomId) },
+          { $push: { bookings: bookingInfo.bookingDate } }
+        );
+
+        // Check if the room was found and updated
+        if (!(updatesResult.matchedCount && insertionResult.insertedId)) {
+          return res
+            .status(404)
+            .send({ success: false, message: "Room not found" });
+        }
+
+        res.status(200).send({ success: true, message: "Booking date added successfully" });
+
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: "Internal server error",
+        });
+      }
+    });
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
