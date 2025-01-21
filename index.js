@@ -11,7 +11,36 @@ const app = express();
 
 // global middleware
 app.use(express.json());
-app.use(cors());
+app.use(cookieParser());
+app.use(
+  cors({
+    origin: ["http://localhost:5173"],
+    credentials: true,
+  })
+);
+
+// jwt token verification middleware
+const verifyToken = (req, res, next) => {
+  const token = req.cookies?.token;
+
+  if (!token) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.decoded = decoded;
+    next();
+  } catch (error) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+};
+
+// cookie credentials
+const cookieCredentials = {
+  secure: process.env.NODE_ENV === "production",
+  sameSite: process.env.NODE_ENV === "production" ? "none" : "strict",
+};
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.cu6ru.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
@@ -81,10 +110,10 @@ async function run() {
     });
 
     // booking apis
-    app.post("/booking", async (req, res) => {
+    app.post("/booking", verifyToken, async (req, res) => {
       try {
         const bookingInfo = req.body;
-        
+
         // Validate room ID
         if (!ObjectId.isValid(bookingInfo.roomId)) {
           return res
@@ -115,14 +144,33 @@ async function run() {
             .send({ success: false, message: "Room not found" });
         }
 
-        res.status(200).send({ success: true, message: "Booking date added successfully" });
-
+        res
+          .status(200)
+          .send({ success: true, message: "Booking date added successfully" });
       } catch (error) {
         res.status(500).send({
           success: false,
           message: "Internal server error",
         });
       }
+    });
+
+    // jwt apis
+    app.post("/get-token", (req, res) => {
+      const payload = req.body;
+      const token = jwt.sign(payload, process.env.JWT_SECRET, {
+        expiresIn: "1d",
+      });
+
+      res
+        .cookie("token", token, cookieCredentials)
+        .send({ success: true, message: "Token sent to client" });
+    });
+
+    app.get("/remove-token", (req, res) => {
+      res
+        .clearCookie("token", cookieCredentials)
+        .send({ success: true, message: "Token removed" });
     });
   } finally {
     // Ensures that the client will close when you finish/error
