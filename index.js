@@ -155,6 +155,79 @@ async function run() {
       }
     });
 
+    app.get("/my-bookings", verifyToken, async (req, res) => {
+      try {
+        const userEmail = req.query.email;
+        const decodedEmail = req.decoded.email;
+
+        if (userEmail !== decodedEmail) {
+          return res.status(403).send({ message: "Forbidden access" });
+        }
+
+        const query = { client_email: userEmail };
+        const options = {
+          sort: { _id: -1 },
+        };
+
+        const cursor = bookingsCollection.find(query, options);
+        const result = await cursor.toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: "Internal server error",
+        });
+      }
+    });
+
+    app.delete("/my-bookings", verifyToken, async (req, res) => {
+      try {
+        const userEmail = req.query.email;
+        const bookingId = req.query.bookingId;
+        const roomId = req.query.roomId;
+        const bookingDate = req.query.date;
+        const decodedEmail = req.decoded.email;
+
+        if (userEmail !== decodedEmail) {
+          return res.status(403).send({ message: "Forbidden access" });
+        }
+
+        if (!ObjectId.isValid(bookingId)) {
+          return res.status(400).json({ message: "Invalid booking ID" });
+        } else if (!ObjectId.isValid(roomId)) {
+          return res.status(400).json({ message: "Invalid room ID" });
+        }
+
+        const roomResult = await roomsCollection.updateOne(
+          { _id: new ObjectId(roomId) },
+          { $pull: { bookings: bookingDate } }
+        );
+
+        const bookingResult = await bookingsCollection.deleteOne({
+          _id: new ObjectId(bookingId),
+        });
+
+        console.log(roomResult, bookingResult)
+        if (roomResult.modifiedCount > 0 && bookingResult.deletedCount === 1) {
+          return res.send({
+            success: true,
+            message: "Booking Canceled successfully!",
+          });
+        } else {
+          res.status(500).send({
+            success: false,
+            message: "Internal server error",
+          });
+        }
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: "Internal server error",
+        });
+      }
+    });
+
     // jwt apis
     app.post("/get-token", (req, res) => {
       const payload = req.body;
