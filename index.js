@@ -87,9 +87,10 @@ async function run() {
             .send({ success: false, message: "Invalid room ID" });
         }
 
-        const query = { _id: new ObjectId(id) };
-        const result = await roomsCollection.findOne(query);
+        // finding room data using roomId
+        const result = await roomsCollection.findOne({ _id: new ObjectId(id) });
 
+        // checking if result exists
         if (!result) {
           return res.status(404).send({
             success: false,
@@ -160,28 +161,52 @@ async function run() {
         const userEmail = req.query.email;
         const decodedEmail = req.decoded.email;
 
+        // Authorization check
         if (userEmail !== decodedEmail) {
-          return res.status(403).send({ message: "Forbidden access" });
+          return res
+            .status(403)
+            .json({ success: false, message: "Forbidden access" });
         }
 
-        const query = { client_email: userEmail };
-        const options = {
-          sort: { _id: -1 },
-        };
+        // Fetch bookings for the user
+        const bookingData = await bookingsCollection
+          .find({ client_email: userEmail })
+          .sort({ _id: -1 }) // Sort by _id in descending order
+          .toArray();
 
-        const cursor = bookingsCollection.find(query, options);
-        const result = await cursor.toArray();
+        // Extract unique roomIds from bookings
+        const roomIds = bookingData.map(
+          (booking) => new ObjectId(booking.roomId)
+        );
 
-        res.send(result);
+        // Fetch all bookings data for the relevant roomIds in a single query
+        const roomData = await roomsCollection
+          .find({ _id: { $in: roomIds } }, { projection: { bookings: 1 } })
+          .toArray();
+
+        // Map room data by roomId for easy access
+        const roomMap = roomData.reduce((acc, room) => {
+          acc[room._id.toString()] = room.bookings || [];
+          return acc;
+        }, {});
+
+        // Merge room bookings data with user bookings
+        const result = bookingData.map((booking) => ({
+          ...booking,
+          bookings: roomMap[booking.roomId] || [], // Attach bookings array from room data
+        }));
+
+        res.status(200).json({ success: true, data: result });
       } catch (error) {
-        res.status(500).send({
+        console.error("Error fetching user bookings:", error);
+        res.status(500).json({
           success: false,
-          message: "Internal server error",
+          message: "An internal server error occurred. Please try again later.",
         });
       }
     });
 
-    app.delete("/my-bookings", verifyToken, async (req, res) => {
+    app.delete("/cancel-booking", verifyToken, async (req, res) => {
       try {
         const userEmail = req.query.email;
         const bookingId = req.query.bookingId;
@@ -189,41 +214,143 @@ async function run() {
         const bookingDate = req.query.date;
         const decodedEmail = req.decoded.email;
 
+        // Authorization check
         if (userEmail !== decodedEmail) {
-          return res.status(403).send({ message: "Forbidden access" });
+          return res
+            .status(403)
+            .send({ success: false, message: "Forbidden access" });
         }
 
+        // Validate ObjectIds
         if (!ObjectId.isValid(bookingId)) {
-          return res.status(400).json({ message: "Invalid booking ID" });
-        } else if (!ObjectId.isValid(roomId)) {
-          return res.status(400).json({ message: "Invalid room ID" });
+          return res
+            .status(400)
+            .json({ success: false, message: "Invalid booking ID" });
         }
 
+        if (!ObjectId.isValid(roomId)) {
+          return res
+            .status(400)
+            .json({ success: false, message: "Invalid room ID" });
+        }
+
+        // Remove the booking date from the room's bookings array
         const roomResult = await roomsCollection.updateOne(
           { _id: new ObjectId(roomId) },
           { $pull: { bookings: bookingDate } }
         );
 
+        // Delete the booking document
         const bookingResult = await bookingsCollection.deleteOne({
           _id: new ObjectId(bookingId),
         });
 
-        console.log(roomResult, bookingResult)
-        if (roomResult.modifiedCount > 0 && bookingResult.deletedCount === 1) {
-          return res.send({
-            success: true,
-            message: "Booking Canceled successfully!",
-          });
-        } else {
-          res.status(500).send({
+        // Check MongoDB operation results
+        if (roomResult.modifiedCount === 0) {
+          return res.status(400).send({
             success: false,
-            message: "Internal server error",
+            message:
+              "Failed to update room bookings. Booking date not found or already removed.",
           });
         }
+
+        if (bookingResult.deletedCount !== 1) {
+          return res.status(400).send({
+            success: false,
+            message: "Failed to delete booking. Booking ID not found.",
+          });
+        }
+
+        // Success response
+        return res.send({
+          success: true,
+          message: "Booking canceled successfully!",
+        });
       } catch (error) {
+        console.error("Error canceling booking:", error);
         res.status(500).send({
           success: false,
-          message: "Internal server error",
+          message:
+            "An error occurred while canceling the booking. Please try again later.",
+        });
+      }
+    });
+
+    app.patch("/update-booking", verifyToken, async (req, res) => {
+      try {
+        const {
+          roomId,
+          bookingId,
+          userEmail,
+          currentBookingDate,
+          newBookingDate,
+        } = req.body;
+        const decodedEmail = req.decoded.email;
+
+        // Authorization Check
+        if (userEmail !== decodedEmail) {
+          return res
+            .status(403)
+            .json({ success: false, message: "Forbidden access" });
+        }
+
+        // Validate ObjectId
+        if (!ObjectId.isValid(bookingId)) {
+          return res
+            .status(400)
+            .json({ success: false, message: "Invalid booking ID" });
+        }
+
+        if (!ObjectId.isValid(roomId)) {
+          return res
+            .status(400)
+            .json({ success: false, message: "Invalid room ID" });
+        }
+
+        // Validate Booking Dates
+        if (!currentBookingDate || !newBookingDate) {
+          return res
+            .status(400)
+            .json({ success: false, message: "Booking dates are required" });
+        }
+
+        // Update Room Bookings Array
+        const roomResult = await roomsCollection.updateOne(
+          { _id: new ObjectId(roomId), bookings: currentBookingDate },
+          { $set: { "bookings.$": newBookingDate } }
+        );
+
+        if (roomResult.modifiedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message:
+              "Failed to update room bookings. Current booking date not found.",
+          });
+        }
+
+        // Update Booking Document
+        const bookingResult = await bookingsCollection.updateOne(
+          { _id: new ObjectId(bookingId) },
+          { $set: { bookingDate: newBookingDate } }
+        );
+
+        if (bookingResult.modifiedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message: "Failed to update booking. Booking ID not found.",
+          });
+        }
+
+        // Success Response
+        res.status(200).json({
+          success: true,
+          message: "Booking date updated successfully",
+        });
+      } catch (error) {
+        console.error("Error updating booking:", error); // Log error for debugging
+        res.status(500).json({
+          success: false,
+          message: "An internal server error occurred. Please try again later.",
         });
       }
     });
