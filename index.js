@@ -69,6 +69,8 @@ async function run() {
     const bookingsCollection = database.collection("bookings");
 
     // rooms apis
+
+    // api to get all the rooms data
     app.get("/rooms", async (req, res) => {
       const cursor = roomsCollection.find();
       const result = await cursor.toArray();
@@ -76,6 +78,7 @@ async function run() {
       res.send(result);
     });
 
+    // api to get the room data using the room id
     app.get("/rooms/:id", async (req, res) => {
       try {
         const id = req.params.id;
@@ -110,52 +113,124 @@ async function run() {
       }
     });
 
-    // booking apis
-    app.post("/booking", verifyToken, async (req, res) => {
+    // api to get top rated rooms based on the user ratings
+    app.get("/top-rated-rooms", async (req, res) => {
       try {
-        const bookingInfo = req.body;
+        const topRooms = await roomsCollection
+          .aggregate([
+            {
+              $addFields: {
+                avgRating: {
+                  $avg: "$userReviews.client_rating", // Calculate average rating
+                },
+              },
+            },
+            { $sort: { avgRating: -1 } }, // Sort by avgRating (Descending)
+            { $limit: 6 }, // Limit to 6 rooms
+            {
+              $project: {
+                _id: 1,
+                name: 1,
+                imageURL: 1,
+                userReviews: 1,
+                description: 1,
+                size: 1,
+                bedType: 1,
+                totalGuests: 1,
+              },
+            }, // Select only necessary fields
+          ])
+          .toArray();
 
-        // Validate room ID
-        if (!ObjectId.isValid(bookingInfo.roomId)) {
-          return res
-            .status(400)
-            .send({ success: false, message: "Invalid room ID" });
-        }
-
-        // Validate booking date
-        if (!bookingInfo.bookingDate) {
-          return res
-            .status(400)
-            .send({ success: false, message: "Booking date is required" });
-        }
-
-        // inserting booking details to booking collection
-        const insertionResult = await bookingsCollection.insertOne(bookingInfo);
-
-        // Update the document by pushing the new booking date to the `bookings` array
-        const updatesResult = await roomsCollection.updateOne(
-          { _id: new ObjectId(bookingInfo.roomId) },
-          { $push: { bookings: bookingInfo.bookingDate } }
-        );
-
-        // Check if the room was found and updated
-        if (!(updatesResult.matchedCount && insertionResult.insertedId)) {
-          return res
-            .status(404)
-            .send({ success: false, message: "Room not found" });
-        }
-
-        res
-          .status(200)
-          .send({ success: true, message: "Booking date added successfully" });
+        res.status(200).json({ success: true, data: topRooms });
       } catch (error) {
-        res.status(500).send({
-          success: false,
-          message: "Internal server error",
-        });
+        console.error("Error fetching top-rated rooms:", error);
+        res
+          .status(500)
+          .json({ success: false, message: "Internal server error" });
       }
     });
 
+    // booking apis
+
+    // api to make a booking
+    app.post("/booking", verifyToken, async (req, res) => {
+      const session = client.startSession(); // Start a session for transaction
+
+      try {
+        session.startTransaction(); // Begin transaction
+
+        const { roomId, bookingDate, ...bookingInfo } = req.body; // Destructure request data
+
+        // Validate room ID
+        if (!ObjectId.isValid(roomId)) {
+          return res
+            .status(400)
+            .json({ success: false, message: "Invalid room ID" });
+        }
+
+        // Validate booking date
+        if (!bookingDate) {
+          return res
+            .status(400)
+            .json({ success: false, message: "Booking date is required" });
+        }
+
+        // Check if the room exists and prevent duplicate booking dates
+        const room = await roomsCollection.findOne({
+          _id: new ObjectId(roomId),
+        });
+
+        if (!room) {
+          return res
+            .status(404)
+            .json({ success: false, message: "Room not found" });
+        }
+
+        if (room.bookings.includes(bookingDate)) {
+          return res
+            .status(409)
+            .json({ success: false, message: "Booking date already taken" });
+        }
+
+        // Insert booking into the bookings collection
+        const bookingInsertResult = await bookingsCollection.insertOne(
+          { roomId, bookingDate, ...bookingInfo },
+          { session }
+        );
+
+        // Update the room's bookings array
+        const roomUpdateResult = await roomsCollection.updateOne(
+          { _id: new ObjectId(roomId) },
+          { $push: { bookings: bookingDate } },
+          { session }
+        );
+
+        // Ensure both operations were successful
+        if (
+          !bookingInsertResult.insertedId ||
+          roomUpdateResult.modifiedCount === 0
+        ) {
+          await session.abortTransaction();
+          return res
+            .status(500)
+            .json({ success: false, message: "Booking failed" });
+        }
+
+        await session.commitTransaction(); // Commit transaction
+        res.status(201).json({ success: true, message: "Booking successful" });
+      } catch (error) {
+        await session.abortTransaction(); // Rollback transaction on error
+        console.error("Error booking room:", error);
+        res
+          .status(500)
+          .json({ success: false, message: "Internal server error" });
+      } finally {
+        session.endSession(); // End transaction session
+      }
+    });
+
+    // api to get all the bookings data specific to the user
     app.get("/my-bookings", verifyToken, async (req, res) => {
       try {
         const userEmail = req.query.email;
@@ -206,6 +281,7 @@ async function run() {
       }
     });
 
+    // api to cancel a booking for specific user
     app.delete("/cancel-booking", verifyToken, async (req, res) => {
       try {
         const userEmail = req.query.email;
@@ -276,6 +352,7 @@ async function run() {
       }
     });
 
+    // api to update the booking data for specific user
     app.patch("/update-booking", verifyToken, async (req, res) => {
       try {
         const {
@@ -351,6 +428,57 @@ async function run() {
         res.status(500).json({
           success: false,
           message: "An internal server error occurred. Please try again later.",
+        });
+      }
+    });
+
+    // api to post a review after booking
+    app.post("/review", verifyToken, async (req, res) => {
+      try {
+        const roomId = req.query.id;
+        const userEmail = req.query.email;
+        const decodedEmail = req.decoded.email;
+        const reviewInfo = req.body;
+
+        // Authorization check
+        if (userEmail !== decodedEmail) {
+          return res
+            .status(403)
+            .send({ success: false, message: "Forbidden access" });
+        }
+
+        // validating room id
+        if (!ObjectId.isValid(roomId)) {
+          return res
+            .status(400)
+            .send({ success: false, message: "Invalid room ID" });
+        }
+
+        // inserting the review to the room collection
+        const result = await roomsCollection.updateOne(
+          { _id: new ObjectId(roomId) },
+          { $push: { userReviews: reviewInfo } }
+        );
+
+        // Check MongoDB operation results
+        if (result.modifiedCount === 0) {
+          return res.status(400).send({
+            success: false,
+            message: "Failed to post review. Please try again later!",
+          });
+        }
+
+        // Success response
+        return res.send({
+          success: true,
+          message: "Review posted successfully!",
+        });
+      } catch (error) {
+        console.error("Error posting review:", error);
+        res.status(500).send({
+          success: false,
+          message:
+            "An error occurred while posting the review. Please try again later.",
         });
       }
     });
