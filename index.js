@@ -500,9 +500,13 @@ async function run() {
         .send({ success: true, message: "Token sent to client" });
     });
 
-    app.get("/remove-token", (req, res) => {
+    app.post("/remove-token", (req, res) => {
       res
-        .clearCookie("token", cookieCredentials)
+        .clearCookie("token", {
+          secure: process.env.NODE_ENV === "production",
+          sameSite: process.env.NODE_ENV === "production" ? "none" : "strict",
+          maxAge: 0
+        })
         .send({ success: true, message: "Token removed" });
     });
   } finally {
